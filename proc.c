@@ -532,3 +532,106 @@ procdump(void)
     cprintf("\n");
   }
 }
+
+
+//clone system call
+int clone(void) {
+	uint ustack[2];
+	void(*fcn)(void*);
+	void *arg;
+	void *stack;
+
+	if(argptr(0, (void*)&fcn, sizeof(fcn) < 0))
+		return -1;
+	if(argptr(1, (void*)&arg, sizeof(arg) < 0))
+			return -1;
+	if(argptr(2, (void*)&stack, sizeof(stack) < 0)){
+			return -1;
+	}
+	int i, pid;
+	struct proc *np;
+  struct proc *curproc = myproc();
+
+	if((uint)stack%PGSIZE!=0){
+		return -1;
+	}
+	if((curproc->sz - (uint)stack) < PGSIZE){
+		return -1;
+	}
+
+	// Allocate process.
+	if((np = allocproc()) == 0)
+	return -1;
+
+	// Copy process state from p.
+	np->pgdir = curproc->pgdir;
+	np->sz = curproc->sz;
+	np->parent = curproc;
+	*np->tf = *curproc->tf;
+	np->tf->esp = (uint)stack+PGSIZE;
+	np->tstack = (uint)stack;
+	ustack[0] = 0xffffffff;
+	ustack[1] = (uint)arg;
+	np->tf->esp -= (2)*4;
+	copyout(np->pgdir, np->tf->esp, ustack, (2)*4);
+	 //Clear %eax so that fork returns 0 in the child.
+	np->tf->eax = 0;
+	np->tf->eip = (uint)fcn;
+	np->tf->ebp = np->tf->esp;
+
+	 for(i = 0; i < NOFILE; i++)
+	    if(curproc->ofile[i])
+	      np->ofile[i] = filedup(curproc->ofile[i]);
+	np->cwd = idup(curproc->cwd);
+
+	pid = np->pid;
+	np->state = RUNNABLE;
+	safestrcpy(np->name, curproc->name, sizeof(curproc->name));
+	return pid;
+}
+
+
+int join(void) {
+  void **stack;
+  struct proc *curproc = myproc();
+  if(argptr(0, (void*)&stack, sizeof(stack) < 0))
+			return -1;
+  if((curproc->sz-(uint)stack)< sizeof(void**))
+	  return -1;
+  struct proc *p;
+  int havethreads, pid;
+
+  acquire(&ptable.lock);
+  for(;;){
+    // Scan through table looking for zombie threads.
+	havethreads = 0;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    	/*if not a thread then keep scanning the pg table*/
+      if(p->pgdir != curproc->pgdir )
+        continue;
+      if(p->parent != curproc )
+              continue;
+	  havethreads = 1;
+
+      if(p->state == ZOMBIE ){
+    	pid = p->pid;
+        p->state = UNUSED;
+        p->pid = 0;
+        p->parent = 0;
+        p->name[0] = 0;
+        p->killed = 0;
+        *((int*)((int*)stack))=p->tstack;
+        release(&ptable.lock);
+        return pid;
+      }
+    }
+
+    // No point waiting if we don't have any children.
+    if(!havethreads || curproc->killed){
+      release(&ptable.lock);
+      return -1;
+    }
+    // Wait for children to exit.  (See wakeup1 call in proc_exit.)
+    sleep(curproc, &ptable.lock);  //DOC: wait-sleep
+  }
+}
